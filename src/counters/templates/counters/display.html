@@ -1,0 +1,38 @@
+{% load static %}<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{ display.name }}</title>
+<link rel="stylesheet" href="{% static 'counters/display.css' %}">
+<script src="{% static 'counters/alpine.min.js' %}" defer></script>
+<script src="{% static 'counters/display.js' %}"></script>
+
+<body>
+  {{ config|json_script:"display-config" }}
+
+  <main class="grid"
+        style="--cols: {{ columns }}; --rows: {{ rows }};"
+        x-data="displayApp('{{ csrf_token }}')"
+        x-init="start()">
+
+    <template x-for="card in cards" :key="card.slug">
+      <article class="card"
+               :class="{ selected: card.slug === selected, flash: card.slug === flashing }"
+               :style="`--color: ${card.color}; --ink: ${inkFor(card.color)}`">
+
+        <span class="card-key" x-show="card.key" x-text="card.key"></span>
+
+        <div class="card-name" x-text="card.name"></div>
+
+        <div class="card-value" x-text="format(card.value)"></div>
+
+        <div class="card-buffer" x-show="card.slug === selected && buffer" x-text="buffer"></div>
+
+        <div class="card-delta"
+             x-show="deltas[card.slug]"
+             :class="deltas[card.slug] > 0 ? 'up' : 'down'"
+             x-text="formatDelta(deltas[card.slug])"></div>
+      </article>
+    </template>
+
+    <div class="offline" x-show="offline" x-cloak>connessione persa</div>
+  </main>
+</body>

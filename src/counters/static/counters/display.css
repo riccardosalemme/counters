@@ -1,0 +1,162 @@
+/* Every card gets the same cell, whatever the count: the grid is sized by the
+ * server and the type scales with the cell, not with the viewport.
+ *
+ * The page is light on purpose. These screens hang where there is daylight, and
+ * black-on-white at full brightness stays readable outdoors in a way that a
+ * dark theme does not. Colour is carried by the border, and a card only fills
+ * with its own colour once it is selected. */
+
+:root {
+  --gap: 0.6vmin;
+  --bg: #fff;
+  --card-bg: #fff;
+  --card-ink: #111114;
+  --muted: #6b6b76;
+  --up: #15803d;
+  --down: #b91c1c;
+}
+
+* { box-sizing: border-box; }
+
+[x-cloak] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--card-ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.grid {
+  display: grid;
+  /* minmax(0, 1fr), not 1fr: a plain 1fr track refuses to shrink below its
+   * content, so one oversized card would push the whole grid past the screen. */
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--rows), minmax(0, 1fr));
+  gap: var(--gap);
+  padding: var(--gap);
+  height: 100dvh;
+}
+
+.card {
+  /* container-type: size, not inline-size, so type can be sized from cqmin —
+   * the shorter of the two sides. A 3x2 grid on a wide screen gives cells that
+   * are wide and short, and sizing on width alone would overflow them. */
+  container-type: size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* Room at the top for the key, at the bottom for the delta badge. Reserved
+   * even when the badge is hidden, so nothing shifts when it appears. */
+  padding: 5cqmin 4cqmin 15cqmin;
+  border: 1.1cqmin solid var(--color);
+  border-radius: 2cqmin;
+  background: var(--card-bg);
+  color: var(--card-ink);
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+/* Selected: the card fills with the counter's own colour and flips its ink,
+ * which reads instantly across a room. */
+.card.selected {
+  background: var(--color);
+  color: var(--ink);
+}
+
+.card.flash {
+  transform: scale(0.97);
+}
+
+/* Name and value share the same centred column: at a glance from across a
+ * kitchen, the label has to be as findable as the number.
+ *
+ * flex: none on both — a flex item shrinks by default, and a shrunken box with
+ * overflow: hidden slices its own text in half rather than spilling. */
+.card-name {
+  flex: none;
+  max-width: 100%;
+  margin-bottom: 10cqmin;
+  font-size: 20cqmin;
+  font-weight: 700;
+  line-height: 1.05;
+  text-align: center;
+  text-wrap: balance;
+  /* Two lines for a long name, then cut. */
+  display: -webkit-box;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  /* overflow: hidden; */
+}
+
+.card-key {
+  position: absolute;
+  top: 3cqmin;
+  right: 2.5cqmin;
+  padding: 0.4cqmin 1.4cqmin;
+  border: 0.3cqmin solid currentColor;
+  border-radius: 1cqmin;
+  font-size: 5cqmin;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.card-value {
+  flex: none;
+  max-width: 100%;
+  font-size: 40cqmin;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.card-buffer {
+  flex: none;
+  margin-top: 5cqmin;
+  padding: 0.5cqmin 2cqmin;
+  /* Outlined rather than filled, so it works over white and over any colour. */
+  border: 0.3cqmin solid currentColor;
+  border-radius: 1cqmin;
+  font-size: 15cqmin;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.card-delta {
+  position: absolute;
+  left: 2cqmin;
+  right: 2cqmin;
+  bottom: 10cqmin;
+  font-size: 30cqmin;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  line-height: 1.05;
+}
+
+.card-delta.up { color: var(--up); }
+.card-delta.down { color: var(--down); }
+
+/* On a filled card the green and red would fight the background, so the delta
+ * borrows the card's own ink instead. */
+.card.selected .card-delta { color: var(--ink); }
+
+.offline {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0.4rem;
+  background: var(--down);
+  color: #fff;
+  text-align: center;
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+}

@@ -1,0 +1,29 @@
+{% load static %}<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accedi &mdash; counters</title>
+<link rel="stylesheet" href="{% static 'counters/pages.css' %}">
+
+<body>
+  <main class="panel">
+    <h1>counters</h1>
+
+    {% if form.errors %}
+      <p class="errors">Nome utente o password non corretti.</p>
+    {% endif %}
+
+    <form method="post">
+      {% csrf_token %}
+
+      <label for="id_username">Nome utente</label>
+      <input type="text" name="username" id="id_username" autocapitalize="none"
+             autocomplete="username" autofocus required>
+
+      <label for="id_password">Password</label>
+      <input type="password" name="password" id="id_password"
+             autocomplete="current-password" required>
+
+      <input type="hidden" name="next" value="{{ next }}">
+      <button type="submit">Accedi</button>
+    </form>
+  </main>
+</body>

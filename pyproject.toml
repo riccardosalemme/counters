@@ -1,0 +1,12 @@
+[project]
+name = "counters"
+version = "0.1.0"
+description = "counters"
+readme = "README.md"
+authors = [
+    { name = "Riccardo Salemme", email = "me@riccardo.top" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "django>=5.2,<6",
+]

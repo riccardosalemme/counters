@@ -1,0 +1,25 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <p>I counter seguenti verranno portati al valore indicato. Ogni reset crea una
+     transazione con la nota, così resta a log il motivo.</p>
+
+  <ul>
+    {% for counter in counters %}
+      <li><strong>{{ counter.name }}</strong> ({{ counter.slug }}) &mdash; ora {{ counter.display_value }}</li>
+    {% endfor %}
+  </ul>
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+
+    {% for counter in counters %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ counter.pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="reset_counters">
+
+    <input type="submit" name="apply" value="Esegui il reset" class="default">
+    <a href="." class="button cancel-link">Annulla</a>
+  </form>
+{% endblock %}
