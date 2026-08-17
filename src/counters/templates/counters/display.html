@@ -16,7 +16,7 @@
     <template x-for="card in cards" :key="card.slug">
       <article class="card"
                :class="{ selected: card.slug === selected, flash: card.slug === flashing }"
-               :style="`--color: ${card.color}; --ink: ${inkFor(card.color)}`">
+               :style="`--color: ${card.color}; --ink: ${inkFor(card.color)}; --value-scale: ${valueScale(card)}`">
 
         <span class="card-key" x-show="card.key" x-text="card.key"></span>
 
@@ -24,12 +24,16 @@
 
         <div class="card-value" x-text="format(card.value)"></div>
 
-        <div class="card-buffer" x-show="card.slug === selected && buffer" x-text="buffer"></div>
+        <!-- Third row, always present: the badge appearing must not move the
+             value, and the quantity buffer needs the same space. -->
+        <div class="card-foot">
+          <span class="card-buffer" x-show="card.slug === selected && buffer" x-text="buffer"></span>
 
-        <div class="card-delta"
-             x-show="deltas[card.slug]"
-             :class="deltas[card.slug] > 0 ? 'up' : 'down'"
-             x-text="formatDelta(deltas[card.slug])"></div>
+          <span class="card-delta"
+                x-show="deltas[card.slug]"
+                :class="deltas[card.slug] > 0 ? 'up' : 'down'"
+                x-text="formatDelta(deltas[card.slug])"></span>
+        </div>
       </article>
     </template>
 

@@ -329,6 +329,41 @@ class AdminActionTests(TestCase):
         self.counter.refresh_from_db()
         self.assertEqual(self.counter.value, Decimal('42.000'))
 
+    def test_a_manual_transaction_moves_the_counter(self):
+        """Logging an operation without applying it would make the log lie."""
+        response = self.client.post('/admin/counters/transaction/add/', {
+            'counter': self.counter.pk, 'type': 'add', 'value': '3',
+            'notes': 'conteggio a mano cassa 2',
+        })
+        self.assertEqual(response.status_code, 302)
+
+        self.counter.refresh_from_db()
+        self.assertEqual(self.counter.value, Decimal('45.000'))
+
+        entry = Transaction.objects.get()
+        self.assertEqual(entry.value_before, Decimal('42.000'))
+        self.assertEqual(entry.value_after, Decimal('45.000'))
+        self.assertEqual(entry.source, Transaction.SOURCE_ADMIN)
+        self.assertEqual(entry.user, self.admin)
+        self.assertEqual(entry.notes, 'conteggio a mano cassa 2')
+
+    def test_a_manual_transaction_on_an_inactive_counter_is_a_form_error(self):
+        Counter.objects.filter(pk=self.counter.pk).update(is_active=False)
+        response = self.client.post('/admin/counters/transaction/add/', {
+            'counter': self.counter.pk, 'type': 'add', 'value': '3', 'notes': '',
+        })
+        self.assertEqual(response.status_code, 200)      # redisplayed, not a 500
+        self.assertFalse(Transaction.objects.exists())
+        self.counter.refresh_from_db()
+        self.assertEqual(self.counter.value, Decimal('42.000'))
+
+    def test_transactions_cannot_be_deleted(self):
+        """Deleting one would leave the counter and the log disagreeing."""
+        entry = apply_operation('caffe', Transaction.ADD, Decimal('1')).transaction
+        response = self.client.post(f'/admin/counters/transaction/{entry.pk}/delete/', {'post': 'yes'})
+        self.assertIn(response.status_code, (403, 302))
+        self.assertTrue(Transaction.objects.filter(pk=entry.pk).exists())
+
     def test_display_list_links_to_the_display(self):
         Display.objects.create(name='Bancone')
         response = self.client.get('/admin/counters/display/')

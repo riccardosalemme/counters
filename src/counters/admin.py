@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils.html import format_html
 
 from .models import (
+    MAX_DIGITS,
     RESERVED_KEYS,
     ApiToken,
     Counter,
@@ -20,7 +21,7 @@ from .models import (
     format_value,
     normalize_key,
 )
-from .operations import OperationError, apply_operation
+from .operations import OperationError, apply_operation, compute
 
 
 class BaseModelAdmin(admin.ModelAdmin):
@@ -138,6 +139,29 @@ class CounterAdmin(BaseModelAdmin):
         })
 
 
+class TransactionForm(forms.ModelForm):
+    """Only what a person types. The rest is computed by apply_operation()."""
+
+    class Meta:
+        model = Transaction
+        fields = ('counter', 'type', 'value', 'notes')
+
+    def clean(self):
+        data = super().clean()
+        counter, operation, value = data.get('counter'), data.get('type'), data.get('value')
+        if not (counter and operation and value is not None):
+            return data
+
+        # Anticipate what apply_operation() would raise, so it surfaces as a
+        # form error instead of a 500 on save.
+        if not counter.is_active:
+            self.add_error('counter', 'Il counter non è attivo: non accetta scritture.')
+        elif len(compute(counter.value, operation, value).as_tuple().digits) > MAX_DIGITS:
+            self.add_error('value', 'Il risultato supera le cifre disponibili.')
+
+        return data
+
+
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
     list_display = ('created_at', 'counter', 'type', 'shown_value', 'shown_after', 'user', 'source', 'notes')
@@ -145,6 +169,8 @@ class TransactionAdmin(admin.ModelAdmin):
     search_fields = ('counter__name', 'counter__slug', 'notes')
     date_hierarchy = 'created_at'
     actions = ('undo_transactions',)
+    form = TransactionForm
+    autocomplete_fields = ('counter',)
 
     @admin.display(description='valore')
     def shown_value(self, obj):
@@ -157,11 +183,36 @@ class TransactionAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('counter', 'user')
 
-    def has_add_permission(self, request):
-        return False
-
     def has_change_permission(self, request, obj=None):
         return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Deleting a transaction would leave the counter at its current value
+        # while the log says otherwise. "Annulla" writes a compensating entry
+        # instead, which keeps the two in step and leaves a trace.
+        return False
+
+    def save_model(self, request, obj, form, change):
+        """Route a hand-written transaction through the normal write path.
+
+        Saving the form's instance directly would log an operation that never
+        touched the counter. apply_operation() moves the value, computes
+        value_before/value_after and records who did it.
+        """
+        result = apply_operation(
+            obj.counter.slug, obj.type, obj.value,
+            user=request.user, source=Transaction.SOURCE_ADMIN, notes=obj.notes,
+        )
+        # Hand the saved row back to the admin, which is about to log the
+        # addition and needs a primary key.
+        obj.pk = result.transaction.pk
+        obj.refresh_from_db()
+        self.message_user(
+            request,
+            f'{obj.counter.name}: {format_value(result.previous_value)} → '
+            f'{format_value(result.counter.value)}.',
+            messages.SUCCESS,
+        )
 
     @admin.action(description='Annulla le transazioni selezionate')
     def undo_transactions(self, request, queryset):

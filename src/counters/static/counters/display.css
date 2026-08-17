@@ -39,22 +39,26 @@ body {
   height: 100dvh;
 }
 
+/* The card is a three-row grid — name, value, foot — so the three can never
+ * land on top of each other, whatever the cell's proportions. The previous
+ * layout centred everything in a flex column and pinned the delta badge to the
+ * bottom with absolute positioning, which meant the badge's height had to be
+ * guessed in the padding: any cell shape that broke the guess put the badge
+ * over the value. */
 .card {
-  /* container-type: size, not inline-size, so type can be sized from cqmin —
-   * the shorter of the two sides. A 3x2 grid on a wide screen gives cells that
-   * are wide and short, and sizing on width alone would overflow them. */
+  /* container-type: size gives both cqi (width) and cqb (height), which the
+   * type sizes below need: the name is limited by width, the value by height,
+   * and a single cqmin scale cannot serve both. */
   container-type: size;
   position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  justify-items: center;
   align-items: center;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  /* Room at the top for the key, at the bottom for the delta badge. Reserved
-   * even when the badge is hidden, so nothing shifts when it appears. */
-  padding: 5cqmin 4cqmin 15cqmin;
+  padding: 7cqmin 3cqmin 2cqmin;
   border: 1.1cqmin solid var(--color);
   border-radius: 2cqmin;
   background: var(--card-bg);
@@ -74,71 +78,73 @@ body {
 }
 
 /* Name and value share the same centred column: at a glance from across a
- * kitchen, the label has to be as findable as the number.
- *
- * flex: none on both — a flex item shrinks by default, and a shrunken box with
- * overflow: hidden slices its own text in half rather than spilling. */
+ * kitchen, the label has to be as findable as the number. */
 .card-name {
-  flex: none;
   max-width: 100%;
-  margin-bottom: 10cqmin;
-  font-size: 20cqmin;
+  font-size: min(13cqi, 15cqb);
   font-weight: 700;
   line-height: 1.05;
   text-align: center;
   text-wrap: balance;
-  /* Two lines for a long name, then cut. */
+  /* Two lines for a long name, then cut. line-clamp does nothing without
+   * overflow: hidden. */
   display: -webkit-box;
-  line-clamp: 2;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  /* overflow: hidden; */
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .card-key {
   position: absolute;
-  top: 3cqmin;
+  top: 2cqmin;
   right: 2.5cqmin;
   padding: 0.4cqmin 1.4cqmin;
   border: 0.3cqmin solid currentColor;
   border-radius: 1cqmin;
-  font-size: 5cqmin;
+  font-size: min(5cqi, 6cqb);
   text-transform: uppercase;
   opacity: 0.6;
 }
 
 .card-value {
-  flex: none;
   max-width: 100%;
-  font-size: 40cqmin;
+  /* --value-scale comes from the page: min() keeps the number inside a short
+   * card, but only the digit count can keep a long one inside a narrow card. */
+  font-size: calc(min(34cqi, 46cqb) * var(--value-scale, 1));
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  line-height: 1.05;
+  line-height: 1;
   white-space: nowrap;
 }
 
+.card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2cqmin;
+  /* Reserved whether or not anything is in it, so the value never shifts. */
+  min-height: min(16cqi, 18cqb);
+  max-width: 100%;
+}
+
 .card-buffer {
-  flex: none;
-  margin-top: 5cqmin;
   padding: 0.5cqmin 2cqmin;
   /* Outlined rather than filled, so it works over white and over any colour. */
   border: 0.3cqmin solid currentColor;
   border-radius: 1cqmin;
-  font-size: 15cqmin;
+  font-size: min(11cqi, 13cqb);
   font-variant-numeric: tabular-nums;
+  line-height: 1.2;
   opacity: 0.8;
 }
 
 .card-delta {
-  position: absolute;
-  left: 2cqmin;
-  right: 2cqmin;
-  bottom: 10cqmin;
-  font-size: 30cqmin;
+  font-size: min(14cqi, 16cqb);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-align: center;
-  line-height: 1.05;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .card-delta.up { color: var(--up); }

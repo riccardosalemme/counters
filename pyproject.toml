@@ -10,4 +10,10 @@ requires-python = ">=3.13"
 dependencies = [
     "django>=5.2,<6",
     "pymysql>=1.2.0",
+    # Serving: gunicorn runs the app, whitenoise serves the static files from
+    # the same process so a container needs nothing in front of it.
+    "gunicorn>=23",
+    "whitenoise>=6.8",
+    # Only used when DATABASE_URL points at PostgreSQL.
+    "psycopg[binary]>=3.2",
 ]

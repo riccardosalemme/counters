@@ -38,6 +38,14 @@ function displayApp(csrfToken) {
       return (delta > 0 ? '+' : '−') + this.format(Math.abs(delta));
     },
 
+    // The CSS caps the value against the card's width and height, but not
+    // against how long the number is: "1.234,5" needs less type than "8" to
+    // fit the same card. Three characters keep full size, longer shrinks.
+    valueScale(card) {
+      const length = this.format(card.value).length;
+      return length <= 3 ? 1 : Math.max(0.45, 3 / length);
+    },
+
     // Pick black or white ink from the perceived brightness of the card colour,
     // so a selected card stays readable whatever colour it was given.
     inkFor(color) {

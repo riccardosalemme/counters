@@ -1,0 +1,56 @@
+# Installazione con PostgreSQL.
+#
+#   export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(50))')"
+#   export POSTGRES_PASSWORD="..."
+#   docker compose -f docker-compose.postgres.yml up --build -d
+#   docker compose -f docker-compose.postgres.yml exec app python manage.py createsuperuser
+#
+# A differenza del file SQLite, qui SECRET_KEY e POSTGRES_PASSWORD sono
+# obbligatorie: questo è il file che finisce su una macchina vera, e un valore
+# di default dimenticato è esattamente il modo in cui ci si fa male.
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-counters}
+      POSTGRES_USER: ${POSTGRES_USER:-counters}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?serve POSTGRES_PASSWORD}
+    volumes:
+      - counters-db:/var/lib/postgresql/data
+    # Senza healthcheck il primo `migrate` parte prima che il database accetti
+    # connessioni, e il container dell'app muore all'avvio.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-counters} -d ${POSTGRES_DB:-counters}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?serve SECRET_KEY, generane una lunga e casuale}
+      DEBUG: "false"
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?serve ALLOWED_HOSTS, es. counters.example.com}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+
+      DATABASE_URL: postgres://${POSTGRES_USER:-counters}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-counters}
+
+      # Lascia questi a "true" se davanti c'è un reverse proxy con HTTPS, che è
+      # il caso previsto. Mettili a "false" solo per una prova in HTTP puro,
+      # altrimenti il cookie di sessione non viene inviato e il login fallisce.
+      SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-true}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      CSRF_COOKIE_SECURE: ${CSRF_COOKIE_SECURE:-true}
+
+      TIME_ZONE: ${TIME_ZONE:-Europe/Rome}
+    restart: unless-stopped
+
+volumes:
+  counters-db:

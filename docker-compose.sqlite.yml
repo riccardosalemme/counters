@@ -1,0 +1,41 @@
+# Prova rapida: un solo servizio, database SQLite su volume.
+#
+#   docker compose -f docker-compose.sqlite.yml up --build -d
+#   docker compose -f docker-compose.sqlite.yml exec app python manage.py createsuperuser
+#
+# Poi http://localhost:8000/admin/
+#
+# Questo file è pensato per provare l'applicazione in locale, non per metterla
+# online: vedi i commenti sulle singole variabili.
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Chiave di comodo per la prova. Su un'istanza raggiungibile da altri va
+      # sostituita con un valore lungo e casuale.
+      SECRET_KEY: ${SECRET_KEY:-prova-locale-non-usare-online}
+      DEBUG: "false"
+      # Aperto per poter aprire il display anche dal tablet in cucina.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+
+      # Il volume è montato su /data e non dentro /app/src: monta il volume
+      # sopra il codice e l'applicazione sparisce.
+      DATABASE_URL: sqlite:///data/db.sqlite3
+
+      # Senza HTTPS davanti questi tre vanno spenti, altrimenti Django
+      # rimanda a https e il cookie di sessione non parte mai: il login
+      # fallirebbe senza dire perché.
+      SECURE_SSL_REDIRECT: "false"
+      SESSION_COOKIE_SECURE: "false"
+      CSRF_COOKIE_SECURE: "false"
+
+      TIME_ZONE: ${TIME_ZONE:-Europe/Rome}
+    volumes:
+      - counters-data:/data
+    restart: unless-stopped
+
+volumes:
+  counters-data:
