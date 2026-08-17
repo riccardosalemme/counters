@@ -200,3 +200,9 @@ COUNTERS_DECIMAL_PLACES = 3
 # How often an ApiToken.last_used_at is refreshed, in seconds. Without this
 # every authenticated read would cost a write.
 COUNTERS_TOKEN_TOUCH_INTERVAL = 60
+
+# Create a counter on the fly when a write names one that does not exist.
+# Convenient, but it costs the 404 that today tells a script its slug is wrong:
+# with this on, a typo quietly starts filling a counter of its own. Set it to
+# false once the set of counters has settled.
+COUNTERS_AUTOCREATE = env_bool('COUNTERS_AUTOCREATE', default=True)

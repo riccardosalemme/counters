@@ -13,9 +13,12 @@ from .models import (
     Counter,
     Display,
     DisplayCounter,
+    Hotkey,
     Tag,
     Transaction,
+    display_key_map,
     format_value,
+    normalize_key,
 )
 from .operations import OperationError, apply_operation
 
@@ -71,7 +74,9 @@ class ResetForm(forms.Form):
 class CounterAdmin(BaseModelAdmin):
     list_display = ('swatch', 'name', 'slug', 'current_value', 'tag', 'is_active')
     list_display_links = ('name',)
-    list_filter = ('is_active', 'tag')
+    # created_at in the filters: with auto-creation on, this is how a counter
+    # born from a typo gets spotted.
+    list_filter = ('is_active', 'tag', 'created_at')
     search_fields = ('name', 'slug')
     autocomplete_fields = ('tag',)
     inlines = (TransactionInline,)
@@ -187,6 +192,53 @@ class TransactionAdmin(admin.ModelAdmin):
             self.message_user(request, failure, messages.WARNING)
 
 
+def live_rows(formset):
+    """The forms of a formset that will actually end up in the database."""
+    for form in formset.forms:
+        if form.cleaned_data and not form.cleaned_data.get('DELETE'):
+            yield form
+
+
+def check_keys(formset, request, display, described):
+    """Reject a key already spoken for anywhere on this display.
+
+    Keys come from four places — counter selection, the three operation keys,
+    the digits reserved for the quantity buffer, and hotkeys — but a display has
+    only one keyboard. Two inlines on the same page cannot see each other's
+    unsaved rows, so each one leaves its keys on the request for the next to
+    read. DisplayCounterInline is validated first (see DisplayAdmin.inlines),
+    so a clash is reported on the hotkey row; either way the save is blocked.
+    """
+    pending = getattr(request, '_pending_display_keys', {})
+    # The rows this formset owns are re-checked from the submitted data, so
+    # their stored keys must not count as taken. Only skip pks of this
+    # formset's own model — the two tables number their rows independently.
+    own_pks = [form.instance.pk for form in formset.forms if form.instance.pk]
+    is_counter = formset.model is DisplayCounter
+    taken = display_key_map(
+        display,
+        skip_counters=own_pks if is_counter else (),
+        skip_hotkeys=() if is_counter else own_pks,
+        pending=pending,
+    ) if display else dict(pending)
+
+    mine = {}
+    for form in live_rows(formset):
+        key = normalize_key(form.cleaned_data.get('key'))
+        if not key:
+            continue
+        if key in RESERVED_KEYS:
+            form.add_error('key', 'Cifre, punto e virgola sono riservati alla quantità.')
+        elif key in mine:
+            form.add_error('key', f'Tasto già usato da un altro {described} qui sopra.')
+        elif key in taken:
+            form.add_error('key', f'Tasto già usato da {taken[key]}.')
+        else:
+            mine[key] = f'{described} in questa pagina'
+
+    request._pending_display_keys = {**pending, **mine}
+
+
 class DisplayCounterInline(admin.TabularInline):
     model = DisplayCounter
     extra = 1
@@ -199,25 +251,45 @@ class DisplayCounterInline(admin.TabularInline):
         class Formset(formset):
             def clean(self):
                 super().clean()
-                operation_keys = {
-                    (getattr(display, field) or '').lower()
-                    for field in ('add_key', 'subtract_key', 'set_key')
-                } if display else set()
+                check_keys(self, request, display, 'counter')
+                # Leave the counters behind too, so a hotkey can point at one
+                # added in this very save.
+                request._pending_display_counters = {
+                    form.cleaned_data['counter'].pk
+                    for form in live_rows(self)
+                    if form.cleaned_data.get('counter')
+                }
 
-                seen = set()
-                for form in self.forms:
-                    if not form.cleaned_data or form.cleaned_data.get('DELETE'):
-                        continue
-                    key = (form.cleaned_data.get('key') or '').lower()
-                    if not key:
-                        continue
-                    if key in RESERVED_KEYS:
-                        form.add_error('key', 'Cifre, punto e virgola sono riservati alla quantità.')
-                    elif key in operation_keys:
-                        form.add_error('key', 'Tasto già usato da un\'operazione del display.')
-                    elif key in seen:
-                        form.add_error('key', 'Tasto già usato da un altro counter.')
-                    seen.add(key)
+        return Formset
+
+
+class HotkeyInline(admin.TabularInline):
+    model = Hotkey
+    extra = 0
+    autocomplete_fields = ('counter',)
+    fields = ('key', 'label', 'counter', 'action', 'value')
+
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        display = obj
+
+        class Formset(formset):
+            def clean(self):
+                super().clean()
+                check_keys(self, request, display, 'hotkey')
+
+                on_display = set(getattr(request, '_pending_display_counters', set()))
+                if not on_display and display:
+                    on_display = set(
+                        display.displaycounter_set.values_list('counter_id', flat=True)
+                    )
+
+                for form in live_rows(self):
+                    counter = form.cleaned_data.get('counter')
+                    if counter and counter.pk not in on_display:
+                        form.add_error(
+                            'counter', 'Il counter non è fra quelli di questo display.',
+                        )
 
         return Formset
 
@@ -227,7 +299,9 @@ class DisplayAdmin(BaseModelAdmin):
     list_display = ('name', 'slug', 'counter_count', 'refresh_interval',
                     'delta_highlight_duration', 'open_link')
     search_fields = ('name', 'slug')
-    inlines = (DisplayCounterInline,)
+    # Order matters: DisplayCounterInline is validated first and leaves its
+    # pending keys and counters on the request for HotkeyInline to check.
+    inlines = (DisplayCounterInline, HotkeyInline)
     fieldsets = (
         (None, {'fields': ('name', 'slug')}),
         ('Aggiornamento', {'fields': ('refresh_interval', 'delta_highlight_duration')}),
@@ -252,6 +326,18 @@ class DisplayAdmin(BaseModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         fields = super().get_readonly_fields(request, obj)
         return fields + ('slug',) if obj else fields
+
+
+@admin.register(Hotkey)
+class HotkeyAdmin(admin.ModelAdmin):
+    list_display = ('key', 'label', 'display', 'counter', 'action', 'shown_value')
+    list_filter = ('display', 'action')
+    search_fields = ('key', 'label', 'counter__name')
+    autocomplete_fields = ('counter',)
+
+    @admin.display(description='quantità')
+    def shown_value(self, obj):
+        return format_value(obj.value)
 
 
 @admin.register(ApiToken)

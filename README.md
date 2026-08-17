@@ -41,6 +41,7 @@ Tutto opzionale, con default da sviluppo:
 | `CSRF_TRUSTED_ORIGINS` | vuoto | separati da virgola |
 | `DATABASE_URL` | SQLite in `src/db.sqlite3` | `postgres://user:pw@host:5432/db` |
 | `TIME_ZONE` | `Europe/Rome` | |
+| `COUNTERS_AUTOCREATE` | `true` | crea al volo un counter nominato da una scrittura ma inesistente, vedi §5.2 |
 | `SECURE_SSL_REDIRECT` | `true` se `DEBUG=false` | |
 | `SECURE_HSTS_SECONDS` | `0` | opt-in: il browser lo rispetta per tutta la durata indicata, quindi un valore dato in fretta è scomodo da annullare |
 
@@ -120,6 +121,27 @@ Le transazioni sono immutabili: in admin non si creano né si modificano a mano.
 
 Cifre `0-9`, `.` e `,` sono **riservate** al buffer della quantità e non possono essere assegnate né a un counter né a un'operazione. La validazione sta in `Display.clean()` e nel formset dell'inline, che verifica anche che le key dei counter non collidano con i tasti operazione del display.
 
+### Hotkey
+
+Un tasto che porta con sé tutta l'operazione, per i gesti che si ripetono per tutto il turno.
+
+| Campo | Tipo | Note |
+|---|---|---|
+| `display` | FK → Display, `CASCADE` | |
+| `counter` | FK → Counter, `CASCADE` | deve essere fra i counter del display |
+| `key` | CharField(20) | un carattere, oppure `F1`, `ArrowUp`, `Enter`, `Space` |
+| `action` | `add` \| `subtract` \| `set` | riusa `Transaction.TYPE_CHOICES` |
+| `value` | Decimal, default 1 | |
+| `label` | CharField(60), blank | promemoria in admin, es. "Fritto +1" |
+
+Unicità su `(display, key)`. Il `counter` deve già essere sul display: premere una hotkey deve produrre un effetto visibile, e un counter fuori griglia non ha una card da far lampeggiare.
+
+`key` è lungo 20 e non 1 perché le lettere finiscono in fretta fra counter e operazioni; il confronto avviene su `event.key` normalizzato a minuscolo su entrambi i lati, quindi `F1` in admin diventa `f1` a database e combacia con `F1` premuto.
+
+**Un display ha una sola tastiera ma quattro sorgenti di tasti**: selezione counter (`DisplayCounter.key`), operazioni (`add_key`/`subtract_key`/`set_key`), cifre e separatori riservati al buffer, e hotkey. `display_key_map()` in [models.py](src/counters/models.py) è l'unica definizione di "questo tasto è occupato", e la usano `Hotkey.clean()`, i due inline admin e i test. Il controllo sta **sul modello** e non solo in admin, così nemmeno uno script può creare una hotkey che oscura un tasto esistente.
+
+Nell'admin i due inline non possono vedersi le righe non ancora salvate, quindi si scambiano i tasti pendenti tramite la `request`: `DisplayCounterInline` è validato per primo e li deposita, `HotkeyInline` li legge. Il conflitto viene segnalato sulla riga della hotkey — da un lato solo, ma il salvataggio è bloccato comunque. Lo stesso canale permette di aggiungere un counter alla griglia e la sua hotkey in un unico salvataggio.
+
 ### ApiToken
 
 `user`, `name`, `key`, `is_active`, `last_used_at`.
@@ -195,7 +217,27 @@ In input sono accettati sia `.` sia `,` come separatore decimale, quindi `/add/c
 }
 ```
 
-### 5.2 Scrittura batch (POST)
+### 5.2 Creazione automatica
+
+Con `COUNTERS_AUTOCREATE` attivo (default), **una scrittura su uno slug inesistente crea il counter** invece di rispondere `404`. Serve per aggiungere un contatore da uno script senza passare dall'admin:
+
+```bash
+curl "https://counters.example.com/add/caffe-lungo/1?token=<chiave>"   # 201
+```
+
+Il counter nasce con `value` 0 prima dell'operazione, nome derivato dallo slug (`caffe-lungo` → "Caffe lungo"), colore di default e nessun tag; `created_by` è il proprietario del token. Sono tutte cose da rifinire in admin, ma il conteggio parte subito.
+
+Regole:
+
+- **Solo in scrittura.** `GET /get/<slug>` su uno slug inesistente resta `404` e la lettura batch continua a omettere gli slug che non conosce: una lettura non deve creare righe, altrimenti un display mal configurato che fa polling ogni due secondi si seminerebbe counter da solo.
+- **Status `201`** invece di `200` quando la creazione avviene davvero, e il campo **`"created": true`** nella risposta (anche dentro `results` nel batch).
+- Un `subtract` su un counter appena creato parte da 0 e finisce **negativo**, coerentemente con il resto.
+- Un counter **inattivo non viene ricreato**: risponde `409`, come qualunque altra scrittura su un counter inattivo.
+- Lo slug deve essere utilizzabile (`[-a-zA-Z0-9_]+`, max 100 caratteri) o la risposta è `400`. Il controllo conta soprattutto per il batch, dove gli slug arrivano da chiavi JSON che nessun converter di URL ha filtrato.
+
+**Il prezzo**: sparisce il `404` che oggi ti dice che uno script ha lo slug sbagliato. Con la creazione automatica attiva, `/add/caffè/1` scritto per errore al posto di `/add/caffe/1` risponde `201` e da quel momento metà dei tuoi conteggi finisce in un counter fantasma, in silenzio. Per questo la lista dei counter in admin è filtrabile per data di creazione — è così che si scovano — e per questo la funzione si spegne con `COUNTERS_AUTOCREATE=false` una volta che l'elenco dei contatori si è stabilizzato.
+
+### 5.3 Scrittura batch (POST)
 
 ```
 POST /set          (alias: POST /batch)
@@ -225,7 +267,7 @@ Con `?partial=1` le operazioni valide vengono applicate, le altre finiscono in `
 
 Questo endpoint accetta anche la sola sessione Django, purché arrivi il CSRF token: è la via che usa il display.
 
-### 5.3 Lettura batch (GET)
+### 5.4 Lettura batch (GET)
 
 ```
 GET /get?counters=counter-1,counter-3,counter-7
@@ -240,11 +282,11 @@ GET /get?counters=counter-1,counter-3,counter-7
 
 Gli slug inesistenti sono semplicemente assenti dalla risposta, senza errore: un display mal configurato deve continuare a mostrare gli altri counter.
 
-### 5.4 Codici di stato
+### 5.5 Codici di stato
 
-`200` ok · `207` batch parziale · `400` valore o operazione non validi · `403` token assente, non valido o disattivato (e scrittura GET tentata con la sola sessione) · `404` counter inesistente · `405` metodo sbagliato · `409` counter inattivo.
+`200` ok · `201` counter creato al volo · `207` batch parziale · `400` valore o operazione non validi · `403` token assente, non valido o disattivato (e scrittura GET tentata con la sola sessione) · `404` counter inesistente · `405` metodo sbagliato · `409` counter inattivo.
 
-### 5.5 Atomicità
+### 5.6 Atomicità
 
 Tutto passa da `apply_operation()` / `apply_batch()` in [src/counters/operations.py](src/counters/operations.py), che sono l'unico punto in cui un valore cambia. Ogni operazione è `select_for_update()` dentro `transaction.atomic()`, così due chiamate concorrenti non perdono un incremento. Un risultato che sforerebbe le 12 cifre viene rifiutato con `400` invece di finire troncato nel database.
 
@@ -279,6 +321,10 @@ Se una richiesta fallisce compare una barra "connessione persa" e il polling ent
 ### Tastiera
 
 ```
+QUALSIASI STATO
+ └─ tasto di una hotkey                → esegue counter+azione+quantità configurati,
+                                         torna a IDLE
+
 IDLE
  └─ tasto di un counter                → SELECTED(counter)
 SELECTED(counter)
@@ -288,6 +334,12 @@ SELECTED(counter)
  ├─ Escape, o 10 s di inattività       → IDLE
  └─ add_key / subtract_key / set_key   → esegue l'operazione, torna a IDLE
 ```
+
+Le **hotkey** hanno la precedenza su tutto e funzionano da qualunque stato: una hotkey fa sempre e solo quello che dice la sua configurazione, che è l'unico comportamento prevedibile per chi la preme senza guardare. Se stavi digitando una quantità su un altro counter, quel buffer viene perso.
+
+Sulle hotkey il `preventDefault()` è necessario, non cosmetico: senza, `F1` apre la guida del browser e `Space` fa scorrere la pagina.
+
+Una hotkey che punta a un counter disattivato **non viene nemmeno mandata alla pagina**: non avrebbe una card da far lampeggiare e la scrittura tornerebbe `409`, quindi il tasto sembrerebbe rotto.
 
 Con il **buffer vuoto**, `add_key` e `subtract_key` applicano **quantità 1** — il caso più frequente al banco è "uno in più" — e la card lampeggia per rendere evidente l'operazione. `set_key` con buffer vuoto viene invece ignorato: un valore da impostare non è mai implicito, e per azzerare basta digitare `0`.
 

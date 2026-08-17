@@ -92,6 +92,19 @@ function displayApp(csrfToken) {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const key = event.key.toLowerCase();
 
+      // Hotkeys come first, and fire from any state: a hotkey always does
+      // exactly what it was configured to do, which is the only behaviour that
+      // stays predictable for someone hitting it without looking. A quantity
+      // half-typed on another counter is dropped.
+      const hotkey = (config.hotkeys || []).find((item) => item.key === key);
+      if (hotkey) {
+        event.preventDefault();
+        this.clear();
+        this.flash(hotkey.slug);
+        this.send(hotkey.slug, hotkey.action, hotkey.value);
+        return;
+      }
+
       const target = this.cards.find((card) => card.key && card.key.toLowerCase() === key);
       if (target) {
         this.select(target.slug);

@@ -1,5 +1,6 @@
 import json
 
+from django.conf import settings
 from django.utils import timezone
 
 from .auth import api_view
@@ -39,8 +40,9 @@ def _write_view(operation):
     def view(request, slug, value, *, user, source):
         result = apply_operation(
             slug, operation, parse_value(value), user=user, source=source,
+            create_missing=settings.COUNTERS_AUTOCREATE,
         )
-        return result.as_dict(), 200
+        return result.as_dict(), 201 if result.created else 200
 
     view.__name__ = f'{operation}_counter'
     return view
@@ -75,7 +77,10 @@ def set_batch(request, *, user, source):
         items[slug] = (operation, parse_value(raw_value))
 
     partial = request.GET.get('partial') in {'1', 'true', 'yes'}
-    results, errors = apply_batch(items, user=user, source=source, partial=partial)
+    results, errors = apply_batch(
+        items, user=user, source=source, partial=partial,
+        create_missing=settings.COUNTERS_AUTOCREATE,
+    )
 
     payload = {
         'results': {slug: result.as_dict() for slug, result in results.items()},

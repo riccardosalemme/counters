@@ -1,4 +1,5 @@
 import math
+import re
 import secrets
 from decimal import Decimal, InvalidOperation
 
@@ -17,6 +18,9 @@ RESERVED_KEYS = frozenset('0123456789.,')
 
 ZERO = Decimal(0)
 QUANTUM = Decimal(1).scaleb(-DECIMAL_PLACES)
+
+# Same shape Django's own slug converter accepts.
+SLUG_RE = re.compile(r'^[-a-zA-Z0-9_]+$')
 
 
 def generate_key():
@@ -65,6 +69,63 @@ def parse_value(raw):
         raise ValueError(f'too many digits: {raw!r}')
 
     return value
+
+
+def normalize_key(key):
+    """A keyboard key as it will be compared against `event.key`.
+
+    Lowercased on both sides, so "F1" stored here matches "F1" pressed there.
+    """
+    return (key or '').strip().lower()
+
+
+def display_key_map(display, *, skip_counters=(), skip_hotkeys=(), pending=None):
+    """Every key already spoken for on a display, as {key: description}.
+
+    The single definition of "this key is taken": used by Display.clean(), by
+    both admin inlines and by the tests. `skip_*` drops rows being edited in the
+    current request, `pending` merges in rows not saved yet.
+    """
+    taken = {}
+
+    for field, described in (('add_key', 'somma'), ('subtract_key', 'sottrazione'),
+                             ('set_key', 'impostazione')):
+        key = normalize_key(getattr(display, field, ''))
+        if key:
+            taken[key] = f'tasto operazione «{described}»'
+
+    if display.pk:
+        rows = display.displaycounter_set.exclude(pk__in=skip_counters).select_related('counter')
+        for row in rows:
+            if row.key:
+                taken[normalize_key(row.key)] = f'counter «{row.counter.name}»'
+
+        for hotkey in display.hotkey_set.exclude(pk__in=skip_hotkeys).select_related('counter'):
+            if hotkey.key:
+                taken[normalize_key(hotkey.key)] = f'hotkey «{hotkey}»'
+
+    if pending:
+        taken.update(pending)
+
+    return taken
+
+
+def validate_slug(slug):
+    """Check a slug that is about to become a new counter.
+
+    Only matters on the auto-creation path: elsewhere an unusable slug simply
+    matches nothing. The URL converter already restricts what can arrive there,
+    but the batch endpoint takes its slugs from JSON keys, which are free text.
+    """
+    if not slug or not SLUG_RE.match(slug):
+        raise ValueError(f'not a usable slug: {slug!r}')
+    if len(slug) > 100:
+        raise ValueError(f'slug too long: {slug!r}')
+    return slug
+
+
+def name_from_slug(slug):
+    return slug.replace('-', ' ').replace('_', ' ').strip().capitalize()
 
 
 def decimal_field(verbose_name, **kwargs):
@@ -224,7 +285,7 @@ class Display(SluggedModel):
         errors = {}
         seen = {}
         for field in ('add_key', 'subtract_key', 'set_key'):
-            key = (getattr(self, field) or '').lower()
+            key = normalize_key(getattr(self, field))
             setattr(self, field, key)
             if not key:
                 continue
@@ -236,6 +297,18 @@ class Display(SluggedModel):
                 seen[key] = field
         if errors:
             raise ValidationError(errors)
+
+    def active_hotkeys(self):
+        """Hotkeys worth sending to the page.
+
+        A hotkey on a disabled counter is left out: the counter has no card to
+        flash and the write would come back 409, so the key would look broken.
+        """
+        return (
+            self.hotkey_set.filter(counter__is_active=True)
+            .select_related('counter')
+            .order_by('key')
+        )
 
     def active_counters(self):
         return (
@@ -283,6 +356,71 @@ class DisplayCounter(models.Model):
         if self.key and self.key in RESERVED_KEYS:
             raise ValidationError(
                 {'key': 'Cifre, punto e virgola sono riservati alla quantità.'}
+            )
+
+
+class Hotkey(models.Model):
+    """One key, one whole operation.
+
+    The long way round is three keystrokes: pick a counter, type a quantity,
+    press the operation. A hotkey carries all three, for the moves that repeat
+    all shift long.
+    """
+
+    display = models.ForeignKey(Display, verbose_name='display', on_delete=models.CASCADE)
+    counter = models.ForeignKey(Counter, verbose_name='counter', on_delete=models.CASCADE)
+    key = models.CharField(
+        'tasto', max_length=20,
+        help_text='Un carattere, oppure un tasto come F1, ArrowUp, Enter, Space.',
+    )
+    # The action of a hotkey *is* the type of the transaction it will produce,
+    # so the choices come from there rather than from a second list to keep
+    # in step.
+    action = models.CharField('azione', max_length=10, choices=Transaction.TYPE_CHOICES,
+                              default=Transaction.ADD)
+    value = decimal_field('quantità', default=Decimal(1))
+    label = models.CharField('etichetta', max_length=60, blank=True,
+                             help_text='Promemoria per l\'admin, es. "Fritto +1".')
+
+    class Meta:
+        verbose_name = 'hotkey'
+        verbose_name_plural = 'hotkey'
+        ordering = ('key',)
+        constraints = [
+            models.UniqueConstraint(fields=['display', 'key'], name='unique_display_hotkey'),
+        ]
+
+    def __str__(self):
+        return self.label or f'{self.key} → {self.counter_id} {self.action} {format_value(self.value)}'
+
+    def clean(self):
+        super().clean()
+        self.key = normalize_key(self.key)
+
+        if not self.key:
+            raise ValidationError({'key': 'Indica un tasto.'})
+        if self.key in RESERVED_KEYS:
+            raise ValidationError(
+                {'key': 'Cifre, punto e virgola sono riservati alla quantità.'}
+            )
+
+        # The four sources of keys share one keyboard, so the check belongs on
+        # the model and not only in the admin: a hotkey created from a shell or
+        # a script must not be able to shadow a counter or an operation key.
+        if self.display_id:
+            taken = display_key_map(
+                self.display, skip_hotkeys=[self.pk] if self.pk else [],
+            )
+            if self.key in taken:
+                raise ValidationError({'key': f'Tasto già usato da {taken[self.key]}.'})
+
+        # Only counters on this display: pressing a hotkey has to show
+        # something, and a counter outside the grid has no card to flash.
+        if self.display_id and self.counter_id and not DisplayCounter.objects.filter(
+            display_id=self.display_id, counter_id=self.counter_id,
+        ).exists():
+            raise ValidationError(
+                {'counter': 'Il counter non è fra quelli di questo display.'}
             )
 
 

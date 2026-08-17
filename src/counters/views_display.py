@@ -42,6 +42,16 @@ def display(request, slug):
         'subtractKey': display.subtract_key,
         'setKey': display.set_key,
         'cards': cards,
+        'hotkeys': [
+            {
+                'key': hotkey.key,
+                'slug': hotkey.counter.slug,
+                'action': hotkey.action,
+                'value': float(hotkey.value),
+                'label': hotkey.label,
+            }
+            for hotkey in display.active_hotkeys()
+        ],
     }
 
     return render(request, 'counters/display.html', {

@@ -1,10 +1,24 @@
 import json
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import Client, TestCase
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction as db_transaction
+from django.test import Client, TestCase, override_settings
 
-from .models import ApiToken, Counter, Display, DisplayCounter, Tag, Transaction, format_value, parse_value
+from .models import (
+    ApiToken,
+    Counter,
+    Display,
+    DisplayCounter,
+    Hotkey,
+    Tag,
+    Transaction,
+    display_key_map,
+    format_value,
+    parse_value,
+)
 from .operations import InactiveCounter, apply_batch, apply_operation
 
 
@@ -91,6 +105,103 @@ class OperationTests(TestCase):
         self.assertEqual(self.counter.value, Decimal('11.000'))
 
 
+class AutoCreateTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user('operatore', password='x')
+        self.token = ApiToken.objects.create(user=self.user, name='script')
+
+    def url(self, path):
+        return f'{path}?token={self.token.key}'
+
+    def test_write_creates_the_counter(self):
+        response = self.client.get(self.url('/add/caffe-lungo/3'))
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()['created'])
+        self.assertEqual(response.json()['value'], 3.0)
+
+        counter = Counter.objects.get(slug='caffe-lungo')
+        self.assertEqual(counter.name, 'Caffe lungo')
+        self.assertEqual(counter.created_by, self.user)
+        self.assertTrue(counter.is_active)
+
+    def test_second_write_does_not_recreate(self):
+        self.client.get(self.url('/add/caffe/1'))
+        response = self.client.get(self.url('/add/caffe/1'))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()['created'])
+        self.assertEqual(Counter.objects.filter(slug='caffe').count(), 1)
+
+    def test_subtract_on_a_new_counter_goes_negative(self):
+        response = self.client.get(self.url('/subtract/caffe/2'))
+        self.assertEqual(response.json()['value'], -2.0)
+
+    def test_reading_never_creates(self):
+        """A read must not write, or a mis-configured display would seed rows."""
+        self.assertEqual(self.client.get(self.url('/get/ignoto')).status_code, 404)
+        self.client.get(self.url('/get') + '&counters=ignoto')
+        self.assertFalse(Counter.objects.exists())
+
+    def test_batch_creates(self):
+        response = self.client.post(
+            self.url('/set'),
+            data=json.dumps({'nuovo': {'operation': 'set', 'value': 5}}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['results']['nuovo']['created'])
+        self.assertEqual(Counter.objects.get(slug='nuovo').value, Decimal('5.000'))
+
+    def test_batch_rejects_an_unusable_slug(self):
+        """Batch slugs come from JSON keys, which no URL converter has filtered."""
+        response = self.client.post(
+            self.url('/set'),
+            data=json.dumps({'Caffè Lungo!': {'operation': 'add', 'value': 1}}),
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Counter.objects.exists())
+
+    def test_inactive_counter_is_not_recreated(self):
+        Counter.objects.create(name='Caffè', is_active=False)
+        self.assertEqual(self.client.get(self.url('/add/caffe/1')).status_code, 409)
+        self.assertEqual(Counter.objects.count(), 1)
+
+    @override_settings(COUNTERS_AUTOCREATE=False)
+    def test_can_be_switched_off(self):
+        self.assertEqual(self.client.get(self.url('/add/ignoto/1')).status_code, 404)
+        self.assertFalse(Counter.objects.exists())
+
+    def test_creation_survives_a_concurrent_insert(self):
+        """Two writers can both miss the row; the loser must reuse the winner's.
+
+        The rival's row is already committed and only our first lookup misses
+        it — which is what a writer sees when the rival commits between its
+        SELECT and its INSERT.
+        """
+        Counter.objects.create(name='Caffè', slug='caffe', value=Decimal('10'))
+
+        real = Counter.objects.select_for_update
+        missed = []
+
+        def lookup(*args, **kwargs):
+            queryset = real(*args, **kwargs)
+            if missed:
+                return queryset
+            missed.append(True)
+            blind = mock.Mock(wraps=queryset)
+            blind.get.side_effect = Counter.DoesNotExist
+            return blind
+
+        with mock.patch.object(Counter.objects, 'select_for_update', lookup):
+            result = apply_operation(
+                'caffe', Transaction.ADD, Decimal('2'), create_missing=True,
+            )
+
+        self.assertFalse(result.created)
+        self.assertEqual(result.counter.value, Decimal('12.000'))
+        self.assertEqual(Counter.objects.filter(slug='caffe').count(), 1)
+
+
 class ApiTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user('operatore', password='x')
@@ -147,9 +258,12 @@ class ApiTests(TestCase):
         self.assertEqual(self.client.get(self.url('/get/caffe')).status_code, 200)
         self.assertEqual(self.client.get(self.url('/add/caffe/1')).status_code, 409)
 
-    def test_unknown_counter_and_bad_value(self):
-        self.assertEqual(self.client.get(self.url('/add/ignoto/1')).status_code, 404)
+    def test_bad_value_is_refused(self):
         self.assertEqual(self.client.get(self.url('/add/caffe/abc')).status_code, 400)
+
+    @override_settings(COUNTERS_AUTOCREATE=False)
+    def test_unknown_counter_without_autocreate(self):
+        self.assertEqual(self.client.get(self.url('/add/ignoto/1')).status_code, 404)
 
     def test_batch_write(self):
         Counter.objects.create(name='Tè', value=Decimal('5'))
@@ -235,6 +349,156 @@ class AdminActionTests(TestCase):
         compensation = Transaction.objects.exclude(pk=original.pk).get()
         self.assertEqual(compensation.type, Transaction.SUBTRACT)
         self.assertEqual(compensation.notes, f'undo #{original.pk}')
+
+
+class HotkeyTests(TestCase):
+    def setUp(self):
+        self.display = Display.objects.create(name='Cucina', add_key='+', subtract_key='-')
+        self.counter = Counter.objects.create(name='Fritto misto')
+        self.other = Counter.objects.create(name='Salamella')
+        DisplayCounter.objects.create(display=self.display, counter=self.counter, key='q')
+
+    def hotkey(self, **kwargs):
+        return Hotkey(**{
+            'display': self.display, 'counter': self.counter,
+            'action': Transaction.ADD, 'value': Decimal('1'), **kwargs,
+        })
+
+    def test_key_is_normalised(self):
+        entry = self.hotkey(key='  F1 ')
+        entry.full_clean()
+        self.assertEqual(entry.key, 'f1')
+
+    def test_digits_and_separators_are_refused(self):
+        for key in ('3', '.', ','):
+            with self.assertRaises(ValidationError, msg=key):
+                self.hotkey(key=key).full_clean()
+
+    def test_clashing_keys_are_refused_by_the_model_itself(self):
+        """Not only by the admin: a shell or a script must not shadow a key."""
+        with self.assertRaises(ValidationError):
+            self.hotkey(key='q').full_clean()      # taken by a counter
+        with self.assertRaises(ValidationError):
+            self.hotkey(key='+').full_clean()      # taken by an operation
+
+    def test_a_hotkey_may_keep_its_own_key_when_edited(self):
+        entry = Hotkey.objects.create(
+            display=self.display, counter=self.counter, key='f1',
+            action=Transaction.ADD, value=Decimal('1'),
+        )
+        entry.value = Decimal('5')
+        entry.full_clean()  # must not report a clash with itself
+
+    def test_counter_must_be_on_the_display(self):
+        with self.assertRaises(ValidationError):
+            self.hotkey(key='f2', counter=self.other).full_clean()
+
+    def test_one_key_per_display(self):
+        Hotkey.objects.create(
+            display=self.display, counter=self.counter, key='f1',
+            action=Transaction.ADD, value=Decimal('1'),
+        )
+        # atomic(): the failed insert would otherwise leave the test's own
+        # transaction broken for anything added after this line.
+        with self.assertRaises(IntegrityError), db_transaction.atomic():
+            Hotkey.objects.create(
+                display=self.display, counter=self.counter, key='f1',
+                action=Transaction.SET, value=Decimal('0'),
+            )
+
+    def test_key_map_covers_every_source(self):
+        Hotkey.objects.create(
+            display=self.display, counter=self.counter, key='f1',
+            action=Transaction.ADD, value=Decimal('1'), label='Fritto +1',
+        )
+        taken = display_key_map(self.display)
+        self.assertEqual(set(taken), {'+', '-', '*', 'q', 'f1'})
+        self.assertIn('Fritto misto', taken['q'])
+        self.assertIn('Fritto +1', taken['f1'])
+
+    def test_hotkeys_reach_the_page(self):
+        Hotkey.objects.create(
+            display=self.display, counter=self.counter, key='f1',
+            action=Transaction.ADD, value=Decimal('2.5'), label='Fritto +2,5',
+        )
+        user = User.objects.create_user('kiosk', password='x')
+        self.client.force_login(user)
+
+        html = self.client.get('/display/cucina').content.decode()
+        raw = html.split('id="display-config" type="application/json">')[1].split('</script>')[0]
+        config = json.loads(raw)
+
+        self.assertEqual(config['hotkeys'], [{
+            'key': 'f1', 'slug': 'fritto-misto', 'action': 'add',
+            'value': 2.5, 'label': 'Fritto +2,5',
+        }])
+
+    def test_hotkeys_on_inactive_counters_are_left_out(self):
+        """No card to flash and the write would 409: the key would look broken."""
+        Hotkey.objects.create(
+            display=self.display, counter=self.counter, key='f1',
+            action=Transaction.ADD, value=Decimal('1'),
+        )
+        Counter.objects.filter(pk=self.counter.pk).update(is_active=False)
+        self.assertEqual(list(self.display.active_hotkeys()), [])
+
+
+class HotkeyAdminTests(TestCase):
+    """The two inlines share one keyboard but not one formset."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser('capo', 'capo@example.com', 'x')
+        self.client.force_login(self.admin)
+        self.display = Display.objects.create(name='Cucina')
+        self.counter = Counter.objects.create(name='Fritto misto')
+        self.link = DisplayCounter.objects.create(
+            display=self.display, counter=self.counter, key='q',
+        )
+
+    def post(self, hotkey_key, counter_key='q'):
+        return self.client.post(f'/admin/counters/display/{self.display.pk}/change/', {
+            'name': 'Cucina', 'slug': 'cucina',
+            'refresh_interval': 2000, 'delta_highlight_duration': 4000,
+            'grid_columns': '', 'add_key': '+', 'subtract_key': '-', 'set_key': '*',
+
+            'displaycounter_set-TOTAL_FORMS': '1',
+            'displaycounter_set-INITIAL_FORMS': '1',
+            'displaycounter_set-0-id': self.link.pk,
+            'displaycounter_set-0-display': self.display.pk,
+            'displaycounter_set-0-counter': self.counter.pk,
+            'displaycounter_set-0-key': counter_key,
+            'displaycounter_set-0-position': '0',
+
+            'hotkey_set-TOTAL_FORMS': '1',
+            'hotkey_set-INITIAL_FORMS': '0',
+            'hotkey_set-0-display': self.display.pk,
+            'hotkey_set-0-counter': self.counter.pk,
+            'hotkey_set-0-key': hotkey_key,
+            'hotkey_set-0-action': 'add',
+            'hotkey_set-0-value': '1',
+            'hotkey_set-0-label': '',
+        })
+
+    def test_a_free_key_is_accepted(self):
+        response = self.post('f1')
+        self.assertEqual(response.status_code, 302, getattr(response, 'context', None))
+        self.assertEqual(Hotkey.objects.get().key, 'f1')
+
+    def test_a_key_already_used_by_a_counter_is_refused(self):
+        """Neither formset sees the other's rows; the request carries them."""
+        response = self.post('q')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Hotkey.objects.exists())
+
+    def test_a_key_moved_onto_a_hotkey_in_the_same_save_is_refused(self):
+        response = self.post('z', counter_key='z')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Hotkey.objects.exists())
+
+    def test_an_operation_key_is_refused(self):
+        response = self.post('+')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Hotkey.objects.exists())
 
 
 class DisplayTests(TestCase):
