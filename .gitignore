@@ -32,7 +32,8 @@ htmlcov/
 .vscode/
 *.swp
 
-# macOS
 .DS_Store
 
 misc
+
+uv.lock

@@ -1,16 +1,12 @@
-"""
-Django settings for the counters project.
-
-Every value that changes between installations is read from the environment,
-so the same code runs on SQLite for a single-node install and on PostgreSQL
-for a shared one. See README.md for the functional specification.
-"""
-
 import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+ENV_FILE = BASE_DIR.parent / '.env'
+load_dotenv(ENV_FILE if ENV_FILE.exists() else BASE_DIR / '.env')
 
 
 def env_bool(name, default=False):
@@ -53,8 +49,6 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    # Serves the collected static files straight from the app process, so a
-    # container needs nothing in front of it to show its own CSS.
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -85,9 +79,6 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 
 # Database
-#
-# DATABASE_URL wins when set, otherwise a local SQLite file. Parsed by hand to
-# avoid pulling in a dependency for fifteen lines of code.
 
 def database_from_url(url):
     parsed = urlparse(url)
@@ -100,7 +91,22 @@ def database_from_url(url):
         raise ValueError(f'unsupported DATABASE_URL scheme: {parsed.scheme!r}')
 
     if parsed.scheme == 'sqlite':
-        return {'ENGINE': engines[parsed.scheme], 'NAME': parsed.path or ':memory:'}
+        # Gestisce i percorsi SQLite relativi ed evita l'errore "unable to open database file"
+        path = parsed.path.lstrip('/') if parsed.path.startswith('/') else parsed.path
+        db_path = BASE_DIR / path if path and path != ':memory:' else (parsed.path or ':memory:')
+        
+        return {
+            'ENGINE': engines[parsed.scheme],
+            'NAME': db_path,
+            'OPTIONS': {
+                'transaction_mode': 'IMMEDIATE',
+                'init_command': (
+                    'PRAGMA journal_mode=WAL;'
+                    'PRAGMA synchronous=NORMAL;'
+                    'PRAGMA busy_timeout=5000;'
+                ),
+            },
+        }
 
     return {
         'ENGINE': engines[parsed.scheme],
@@ -123,11 +129,6 @@ else:
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
             'OPTIONS': {
-                # SQLite has no row-level locking, so select_for_update() is a
-                # no-op there and concurrency relies on the write lock instead:
-                # IMMEDIATE takes it when the transaction opens rather than at
-                # the first write, which is what makes read-modify-write on a
-                # counter safe. WAL keeps readers from blocking meanwhile.
                 'transaction_mode': 'IMMEDIATE',
                 'init_command': (
                     'PRAGMA journal_mode=WAL;'
@@ -150,23 +151,17 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 
 LANGUAGE_CODE = 'it-it'
-
 TIME_ZONE = os.environ.get('TIME_ZONE', 'Europe/Rome')
-
 USE_I18N = True
-
 USE_TZ = True
 
 
 # Static files
 
 STATIC_URL = 'static/'
-
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 if not DEBUG:
-    # Hashed filenames + long-lived caching. Only outside DEBUG: the manifest
-    # exists once collectstatic has run.
     STORAGES = {
         'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
         'staticfiles': {
@@ -178,47 +173,27 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Sessions and CSRF
-#
-# Strict SameSite means a cross-site request never carries the session cookie.
-# It is a second line of defence: the first one is that write endpoints reached
-# over GET refuse session authentication outright (see counters/auth.py).
 
 SESSION_COOKIE_SAMESITE = 'Strict'
 CSRF_COOKIE_SAMESITE = 'Strict'
 SESSION_COOKIE_HTTPONLY = True
 
 if not DEBUG:
-    # Secure by default, but overridable: an instance reached over plain HTTP —
-    # a kiosk on a LAN, a container someone is trying out — would otherwise
-    # never receive its session cookie, and login would fail with no clue why.
     SESSION_COOKIE_SECURE = env_bool('SESSION_COOKIE_SECURE', default=True)
     CSRF_COOKIE_SECURE = env_bool('CSRF_COOKIE_SECURE', default=True)
     SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', default=True)
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    # Off unless asked for: a browser honours HSTS for the whole duration it
-    # was given, so a hasty value is painful to walk back.
     SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '0'))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS')
 
-# The admin login refuses anyone without is_staff, so a plain operator could
-# not even open a display. The display has its own login instead.
 LOGIN_URL = '/login'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login'
 
 
-# counters
+# counters app settings
 
-# Precision of Counter.value and of every value stored on a Transaction.
 COUNTERS_MAX_DIGITS = 12
 COUNTERS_DECIMAL_PLACES = 3
-
-# How often an ApiToken.last_used_at is refreshed, in seconds. Without this
-# every authenticated read would cost a write.
 COUNTERS_TOKEN_TOUCH_INTERVAL = 60
-
-# Create a counter on the fly when a write names one that does not exist.
-# Convenient, but it costs the 404 that today tells a script its slug is wrong:
-# with this on, a typo quietly starts filling a counter of its own. Set it to
-# false once the set of counters has settled.
 COUNTERS_AUTOCREATE = env_bool('COUNTERS_AUTOCREATE', default=True)

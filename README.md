@@ -1,17 +1,25 @@
 # counters
 
-`counters` è un'applicazione web per gestire contatori numerici tramite semplici chiamate HTTP e per visualizzarli su schermi in stile KDS (Kitchen Display System), con supporto a input da tastiera fisica.
+> ```bash
+> curl "https://counters.dev/add/caffe/1?token=<token>"
+> ```
 
-Obiettivi di progetto:
+> ```bash
+> curl "https://counters.dev/subtract/caffe/1?token=<token>"
+> ```
 
-- API richiamabile da script, curl, shortcut iOS, ESP32, bottoni fisici: URL semplici, nessun header obbligatorio.
-- Ogni modifica è tracciata (chi, quando, cosa, perché) tramite transazioni.
-- Configurazione interamente da Django admin, zero file di configurazione per l'uso quotidiano.
-- Codice minimale e leggibile.
+> ```bash
+> curl "https://counters.dev/set/caffe/10?token=<token>"
+> ```
+
+`counters` è una semplice applicazione web per **gestire e visualizzare contatori numerici**. L'aggiornamento dei valori può essere effettuato tramite chiamate HTTP GET e o dall'interfaccia. 
+
+![Counters UI Screenshot](img/counters_ui_1.png)
+![Counters Admin Screenshot](img/counters_admin_1.png)
 
 ---
 
-## 1. Avvio rapido
+## Installazione
 
 ```bash
 uv sync
@@ -21,13 +29,13 @@ uv run python manage.py createsuperuser
 uv run python manage.py runserver
 ```
 
-Da `http://localhost:8000/admin/`: crea un `Counter`, un `ApiToken` (la chiave la genera il backend) e un `Display` con i counter e i tasti associati. Poi:
+Una volta installato da `http://localhost:8000/admin/` puoi gestire i contatori, display e le chiavi API. Per iniziare crea un `Counter`, un `ApiToken` e un `Display` con i counter e i tasti associati. 
 
 ```bash
-curl "http://localhost:8000/add/caffe/1?token=<chiave>"
+curl "http://localhost:8000/<add|subtract|set>/<counter-slug>/<quantity>?token=<api-token>"
 ```
 
-Il display è su `http://localhost:8000/display/<slug>`, e `http://localhost:8000/` elenca quelli configurati. Chi deve solo guardare o usare un display **non serve che sia staff**: gli basta un utente Django qualsiasi, che accede da `/login`.
+Il display è su `http://localhost:8000/display/<display-slug>`, e `http://localhost:8000/` elenca quelli configurati.
 
 ### Configurazione
 
@@ -49,27 +57,8 @@ Con `DEBUG=false` i cookie diventano `Secure` e viene forzato HTTPS.
 
 ---
 
-## 2. Stack
 
-| Componente | Scelta |
-|---|---|
-| Backend | Django 5.2 |
-| DB | SQLite (single-node) o PostgreSQL, via `DATABASE_URL` |
-| API | view Django classiche — gli endpoint sono pochi e non REST-standard, DRF non servirebbe a niente |
-| Frontend display | template Django + Alpine.js vendorizzato, **nessun build step** |
-| Admin | Django admin standard |
-
-Su SQLite le connessioni usano `transaction_mode=IMMEDIATE` e journal WAL: SQLite non ha lock di riga, quindi `select_for_update()` lì è un no-op e la correttezza del read-modify-write dipende dal fatto che il lock di scrittura venga preso all'apertura della transazione anziché alla prima scrittura.
-
----
-
-## 3. Modello dati
-
-Tutti i modelli configurabili ereditano da `BaseModel` (`created_at`, `updated_at`, `created_by`, `updated_by`). `Tag`, `Counter` e `Display` ereditano da `SluggedModel`, che riempie lo slug vuoto partendo dal nome (minuscolo, spazi → `-`, accenti rimossi) aggiungendo un suffisso numerico in caso di collisione.
-
-### Tag
-
-`name`, `slug`. Raggruppa i counter per filtrarli in admin.
+## Strutture dati
 
 ### Counter
 
@@ -138,10 +127,6 @@ Unicità su `(display, key)`. Il `counter` deve già essere sul display: premere
 
 `key` è lungo 20 e non 1 perché le lettere finiscono in fretta fra counter e operazioni; il confronto avviene su `event.key` normalizzato a minuscolo su entrambi i lati, quindi `F1` in admin diventa `f1` a database e combacia con `F1` premuto.
 
-**Un display ha una sola tastiera ma quattro sorgenti di tasti**: selezione counter (`DisplayCounter.key`), operazioni (`add_key`/`subtract_key`/`set_key`), cifre e separatori riservati al buffer, e hotkey. `display_key_map()` in [models.py](src/counters/models.py) è l'unica definizione di "questo tasto è occupato", e la usano `Hotkey.clean()`, i due inline admin e i test. Il controllo sta **sul modello** e non solo in admin, così nemmeno uno script può creare una hotkey che oscura un tasto esistente.
-
-Nell'admin i due inline non possono vedersi le righe non ancora salvate, quindi si scambiano i tasti pendenti tramite la `request`: `DisplayCounterInline` è validato per primo e li deposita, `HotkeyInline` li legge. Il conflitto viene segnalato sulla riga della hotkey — da un lato solo, ma il salvataggio è bloccato comunque. Lo stesso canale permette di aggiungere un counter alla griglia e la sua hotkey in un unico salvataggio.
-
 ### ApiToken
 
 `user`, `name`, `key`, `is_active`, `last_used_at`.
@@ -172,31 +157,11 @@ Le scritture in POST possono usare la sessione, perché lì il CSRF token c'è. 
 
 `SESSION_COOKIE_SAMESITE = "Strict"` fa da seconda linea.
 
-### Rischi accettati del token in query string
 
-Il token finisce nei log di nginx/Django, nella cronologia del browser, e in un URL condiviso per sbaglio. Combinato con i GET di scrittura, questo significa che **un URL di scrittura incollato in una chat viene aperto dall'unfurler di Slack/WhatsApp/iMessage e il contatore si muove da solo**.
-
-Mitigazioni attive:
-
-- `Cache-Control: no-store` e `Referrer-Policy: no-referrer` su ogni risposta API;
-- un token per device/script, revocabile singolarmente;
-- HTTPS forzato quando `DEBUG=false`.
-
-Da fare prima di esporre l'app su internet: filtro sui log per oscurare `token=`, e rate limit per token (vedi §9).
-
-La rete di sicurezza vera resta il log completo delle transazioni: qualunque movimento errato è identificabile e annullabile.
 
 ---
 
 ## 5. API
-
-Base URL negli esempi: `https://counters.example.com`. Ogni chiamata richiede `?token=<chiave>`, omesso qui sotto per leggibilità.
-
-I valori viaggiano come **numeri JSON**, non stringhe: con 12 cifre significative il round-trip in `double` è esatto e gli script possono fare aritmetica senza conversioni.
-
-In input sono accettati sia `.` sia `,` come separatore decimale, quindi `/add/caffe/1.5` e `/add/caffe/1,5` sono equivalenti.
-
-### 5.1 Singolo counter (GET)
 
 | Endpoint | Effetto |
 |---|---|
@@ -205,7 +170,6 @@ In input sono accettati sia `.` sia `,` come separatore decimale, quindi `/add/c
 | `GET /set/<slug>/<n>` | `value = n`, **sempre assoluto** |
 | `GET /get/<slug>` | legge il valore, nessuna transazione |
 
-`set` imposta soltanto: la sintassi `+n` / `-n` non esiste più, per incrementare c'è `add`. Quindi `GET /set/caffe/-10` porta il counter **a -10**, senza ambiguità. `GET /add/caffe/-3` funziona ed equivale a un `subtract` di 3, ma sporca il log: meglio usare l'endpoint giusto.
 
 ```json
 {
@@ -222,10 +186,10 @@ In input sono accettati sia `.` sia `,` come separatore decimale, quindi `/add/c
 Con `COUNTERS_AUTOCREATE` attivo (default), **una scrittura su uno slug inesistente crea il counter** invece di rispondere `404`. Serve per aggiungere un contatore da uno script senza passare dall'admin:
 
 ```bash
-curl "https://counters.example.com/add/caffe-lungo/1?token=<chiave>"   # 201
+curl "https://counters.dev/add/caffe-lungo/1?token=<chiave>" # 201
 ```
 
-Il counter nasce con `value` 0 prima dell'operazione, nome derivato dallo slug (`caffe-lungo` → "Caffe lungo"), colore di default e nessun tag; `created_by` è il proprietario del token. Sono tutte cose da rifinire in admin, ma il conteggio parte subito.
+Il counter nasce con `value` 0 prima dell'operazione, nome derivato dallo slug (`caffe-lungo` → "Caffe lungo"), colore di default e nessun tag; `created_by` è il proprietario del token.
 
 Regole:
 
@@ -234,8 +198,6 @@ Regole:
 - Un `subtract` su un counter appena creato parte da 0 e finisce **negativo**, coerentemente con il resto.
 - Un counter **inattivo non viene ricreato**: risponde `409`, come qualunque altra scrittura su un counter inattivo.
 - Lo slug deve essere utilizzabile (`[-a-zA-Z0-9_]+`, max 100 caratteri) o la risposta è `400`. Il controllo conta soprattutto per il batch, dove gli slug arrivano da chiavi JSON che nessun converter di URL ha filtrato.
-
-**Il prezzo**: sparisce il `404` che oggi ti dice che uno script ha lo slug sbagliato. Con la creazione automatica attiva, `/add/caffè/1` scritto per errore al posto di `/add/caffe/1` risponde `201` e da quel momento metà dei tuoi conteggi finisce in un counter fantasma, in silenzio. Per questo la lista dei counter in admin è filtrabile per data di creazione — è così che si scovano — e per questo la funzione si spegne con `COUNTERS_AUTOCREATE=false` una volta che l'elenco dei contatori si è stabilizzato.
 
 ### 5.3 Scrittura batch (POST)
 
@@ -380,18 +342,9 @@ Test: `cd src && uv run python manage.py test counters`.
 
 ---
 
-## 9. Da fare prima di esporre l'app su internet
-
-- **Filtro sui log** per oscurare il parametro `token`, altrimenti ogni chiave finisce in chiaro negli access log.
-- **Rate limit per token** (es. 60 operazioni/minuto): limita il danno di un token trapelato o di uno script impazzito.
-- **Cache condivisa** (Redis o database) se si gira con più worker: il throttle di `last_used_at` usa la cache locale del processo, che con più worker moltiplica le scritture senza rompere nulla.
-- Valutare un `?nonce=<uuid>` con deduplica server-side, se emergono incrementi fantasma da prefetch del browser o unfurl dei link.
-
----
-
 ## 10. Limiti noti
 
 - **Nessuno scope sui token**: qualunque token valido può muovere qualunque counter.
-- **Istanza singola condivisa**: niente multi-tenant, chi vede un display li vede tutti. Separare gruppi di utenti richiederebbe di toccare il modello dati, meglio prima di avere dati in produzione.
+- **Istanza singola condivisa**: niente multi-tenant, chi vede un display li vede tutti.
 - **Identità sul display**: le operazioni da tastiera sono attribuite all'utente loggato sul kiosk, che è condiviso da tutto il turno. Il campo `user` di quelle transazioni identifica il display, non la persona.
 - **Cancellare un counter** dall'admin ne distrugge lo storico (`CASCADE` sulle transazioni). Per togliere di mezzo un counter si usa `is_active=False`.
