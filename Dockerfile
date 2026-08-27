@@ -16,7 +16,7 @@ WORKDIR /app
 # Dependencies first and on their own, so editing the source does not rebuild
 # this layer.
 COPY pyproject.toml ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --no-dev --no-install-project
 
 COPY src/ ./src/
 WORKDIR /app/src
